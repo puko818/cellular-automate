@@ -1,0 +1,72 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SERVICE_NAME: cellular-automata
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY:   ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Create or update App Runner service
+        env:
+          ECR_REGISTRY:       ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY:     ${{ secrets.ECR_REPOSITORY }}
+          APPRUNNER_ROLE_ARN: ${{ secrets.APPRUNNER_ROLE_ARN }}
+        run: |
+          EXISTING=$(aws apprunner list-services \
+            --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn" \
+            --output text)
+
+          if [ -z "$EXISTING" ]; then
+            echo "Creating App Runner service for the first time..."
+            URL=$(aws apprunner create-service \
+              --service-name $SERVICE_NAME \
+              --source-configuration "$(cat <<EOF
+          {
+            "ImageRepository": {
+              "ImageIdentifier": "$ECR_REGISTRY/$ECR_REPOSITORY:latest",
+              "ImageConfiguration": {"Port": "5000"},
+              "ImageRepositoryType": "ECR"
+            },
+            "AuthenticationConfiguration": {
+              "AccessRoleArn": "$APPRUNNER_ROLE_ARN"
+            },
+            "AutoDeploymentsEnabled": true
+          }
+          EOF
+          )" \
+              --instance-configuration '{"Cpu":"1 vCPU","Memory":"2 GB"}' \
+              --query "Service.ServiceUrl" \
+              --output text)
+            echo "Deployed! Service URL: https://$URL"
+          else
+            echo "Service already exists - App Runner will auto-deploy the new image."
+          fi

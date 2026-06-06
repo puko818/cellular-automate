@@ -1,0 +1,19 @@
+runs:
+  default:
+    seeds: 15
+    fps: 15
+    duration: 30
+    width: 1080
+    height: 1080
+    burn_in: 2000
+    steps_frame: 8
+    crf: 18
+  preview:
+    seeds: 10
+    fps: 15
+    duration: 10
+    width: 512
+    height: 512
+    burn_in: 1000
+    steps_frame: 8
+    crf: 23

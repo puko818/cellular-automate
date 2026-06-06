@@ -1,0 +1,7 @@
+services:
+  simulator:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./generated_files:/app/generated_files

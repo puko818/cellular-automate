@@ -1,0 +1,9 @@
+generated_files/
+__pycache__/
+*.pyc
+*.pyo
+.git/
+*.mp4
+*.png
+CLAUDE.md
+azure/
