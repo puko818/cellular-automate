@@ -1,4 +1,4 @@
-# Sets up AWS infrastructure (one-time).
+# Sets up AWS infrastructure (one-time, safe to re-run).
 # After running this script, trigger builds with:
 #   aws codebuild start-build --project-name cellular-automata
 #
@@ -13,11 +13,13 @@
 param(
     [Parameter(Mandatory)][string]$GitHubRepoUrl,
     [Parameter(Mandatory)][string]$GitHubToken,
-    [string]$Region          = "us-east-1",
-    [string]$RepoName        = "cellular-automata",
-    [string]$ServiceName     = "cellular-automata",
-    [string]$AppRunnerRole   = "AppRunnerECRAccessRole",
-    [string]$CodeBuildRole   = "CodeBuildDeployRole"
+    [string]$Region        = "us-east-1",
+    [string]$RepoName      = "cellular-automata",
+    [string]$AppName       = "cellular-automata",
+    [string]$EnvName       = "cellular-automata-env",
+    [string]$CodeBuildRole = "CodeBuildDeployRole",
+    [string]$Ec2Role       = "CellularAutomataEC2Role",
+    [string]$Ec2Profile    = "CellularAutomataEC2Profile"
 )
 
 function Invoke-Aws {
@@ -27,67 +29,152 @@ function Invoke-Aws {
 
 function Write-TempJson($Object) {
     $f = [System.IO.Path]::GetTempFileName()
-    ($Object | ConvertTo-Json -Depth 10) | Out-File -FilePath $f -Encoding utf8
+    # Out-File -Encoding utf8 writes a BOM in PS 5.1 which AWS CLI rejects as invalid JSON
+    [System.IO.File]::WriteAllText($f, ($Object | ConvertTo-Json -Depth 10 -Compress))
     return $f
 }
 
-Write-Host "==> Creating ECR repository '$RepoName'..."
-Invoke-Aws ecr create-repository --repository-name $RepoName --region $Region | Out-Null
+$AccountId = aws sts get-caller-identity --query Account --output text
+$EbBucket  = "cellular-automata-eb-$AccountId"
 
-Write-Host "==> Creating IAM role so App Runner can pull from ECR..."
-$AppRunnerTrust = Write-TempJson @{
-    Version   = "2012-10-17"
-    Statement = @(@{ Effect = "Allow"; Principal = @{ Service = "build.apprunner.amazonaws.com" }; Action = "sts:AssumeRole" })
+# ECR repository
+aws ecr describe-repositories --repository-names $RepoName --region $Region 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "==> Creating ECR repository '$RepoName'..."
+    Invoke-Aws ecr create-repository --repository-name $RepoName --region $Region | Out-Null
+} else {
+    Write-Host "==> ECR repository '$RepoName' already exists, skipping."
 }
-Invoke-Aws iam create-role --role-name $AppRunnerRole --assume-role-policy-document "file://$AppRunnerTrust" | Out-Null
-Invoke-Aws iam attach-role-policy --role-name $AppRunnerRole --policy-arn arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess | Out-Null
-$AppRunnerRoleArn = aws iam get-role --role-name $AppRunnerRole --query Role.Arn -o text
 
-Write-Host "==> Creating IAM role for CodeBuild..."
-$CodeBuildTrust = Write-TempJson @{
-    Version   = "2012-10-17"
-    Statement = @(@{ Effect = "Allow"; Principal = @{ Service = "codebuild.amazonaws.com" }; Action = "sts:AssumeRole" })
+# S3 bucket for EB deployment bundles
+aws s3api head-bucket --bucket $EbBucket 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "==> Creating S3 bucket '$EbBucket'..."
+    if ($Region -eq "us-east-1") {
+        # us-east-1 does not accept a LocationConstraint
+        Invoke-Aws s3api create-bucket --bucket $EbBucket --region $Region | Out-Null
+    } else {
+        Invoke-Aws s3api create-bucket --bucket $EbBucket --region $Region `
+            --create-bucket-configuration LocationConstraint=$Region | Out-Null
+    }
+} else {
+    Write-Host "==> S3 bucket '$EbBucket' already exists, skipping."
 }
-Invoke-Aws iam create-role --role-name $CodeBuildRole --assume-role-policy-document "file://$CodeBuildTrust" | Out-Null
-Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser | Out-Null
-Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess | Out-Null
-Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AWSAppRunnerFullAccess | Out-Null
-$CodeBuildRoleArn = aws iam get-role --role-name $CodeBuildRole --query Role.Arn -o text
 
+# EC2 instance profile — lets EB instances pull the Docker image from ECR
+aws iam get-role --role-name $Ec2Role 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "==> Creating EC2 instance profile for Elastic Beanstalk..."
+    $Ec2Trust = Write-TempJson @{
+        Version   = "2012-10-17"
+        Statement = @(@{ Effect = "Allow"; Principal = @{ Service = "ec2.amazonaws.com" }; Action = "sts:AssumeRole" })
+    }
+    Invoke-Aws iam create-role --role-name $Ec2Role --assume-role-policy-document "file://$Ec2Trust" | Out-Null
+    Invoke-Aws iam attach-role-policy --role-name $Ec2Role --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly | Out-Null
+    Invoke-Aws iam attach-role-policy --role-name $Ec2Role --policy-arn arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier | Out-Null
+    Invoke-Aws iam create-instance-profile --instance-profile-name $Ec2Profile | Out-Null
+    Invoke-Aws iam add-role-to-instance-profile --instance-profile-name $Ec2Profile --role-name $Ec2Role | Out-Null
+} else {
+    Write-Host "==> EC2 instance profile already exists, skipping."
+}
+
+# CodeBuild IAM role
+aws iam get-role --role-name $CodeBuildRole 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "==> Creating IAM role for CodeBuild..."
+    $CodeBuildTrust = Write-TempJson @{
+        Version   = "2012-10-17"
+        Statement = @(@{ Effect = "Allow"; Principal = @{ Service = "codebuild.amazonaws.com" }; Action = "sts:AssumeRole" })
+    }
+    Invoke-Aws iam create-role --role-name $CodeBuildRole --assume-role-policy-document "file://$CodeBuildTrust" | Out-Null
+    Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser | Out-Null
+    Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess | Out-Null
+    Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk | Out-Null
+    Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess | Out-Null
+} else {
+    Write-Host "==> IAM role '$CodeBuildRole' already exists, skipping."
+}
+$CodeBuildRoleArn = aws iam get-role --role-name $CodeBuildRole --query Role.Arn --output text
+
+# GitHub credentials for CodeBuild
 Write-Host "==> Connecting GitHub account to CodeBuild..."
 Invoke-Aws codebuild import-source-credentials `
     --server-type GITHUB `
     --auth-type PERSONAL_ACCESS_TOKEN `
     --token $GitHubToken | Out-Null
 
-Write-Host "==> Creating CodeBuild project..."
-$Project = Write-TempJson @{
-    name        = $ServiceName
-    source      = @{
-        type      = "GITHUB"
-        location  = $GitHubRepoUrl
-        buildspec = "buildspec.yml"
+# CodeBuild project
+$Existing = aws codebuild batch-get-projects --names $AppName --query "projects[0].name" --output text 2>$null
+if ($Existing -eq "None" -or [string]::IsNullOrWhiteSpace($Existing)) {
+    Write-Host "==> Creating CodeBuild project..."
+    $Project = Write-TempJson @{
+        name        = $AppName
+        source      = @{ type = "GITHUB"; location = $GitHubRepoUrl; buildspec = "buildspec.yml" }
+        environment = @{
+            type                 = "LINUX_CONTAINER"
+            image                = "aws/codebuild/standard:7.0"
+            computeType          = "BUILD_GENERAL1_SMALL"
+            privilegedMode       = $true
+            environmentVariables = @(
+                @{ name = "ECR_REPOSITORY"; value = $RepoName }
+                @{ name = "APP_NAME";       value = $AppName }
+                @{ name = "EB_ENV_NAME";    value = $EnvName }
+                @{ name = "EB_BUCKET";      value = $EbBucket }
+            )
+        }
+        serviceRole = $CodeBuildRoleArn
+        artifacts   = @{ type = "NO_ARTIFACTS" }
     }
-    environment = @{
-        type                  = "LINUX_CONTAINER"
-        image                 = "aws/codebuild/standard:7.0"
-        computeType           = "BUILD_GENERAL1_SMALL"
-        privilegedMode        = $true
-        environmentVariables  = @(
-            @{ name = "ECR_REPOSITORY";     value = $RepoName }
-            @{ name = "SERVICE_NAME";       value = $ServiceName }
-            @{ name = "APPRUNNER_ROLE_ARN"; value = $AppRunnerRoleArn }
-        )
-    }
-    serviceRole = $CodeBuildRoleArn
-    artifacts   = @{ type = "NO_ARTIFACTS" }
+    Invoke-Aws codebuild create-project --cli-input-json "file://$Project" | Out-Null
+} else {
+    Write-Host "==> CodeBuild project '$AppName' already exists, skipping."
 }
-Invoke-Aws codebuild create-project --cli-input-json "file://$Project" | Out-Null
+
+# Elastic Beanstalk application
+$EbApp = aws elasticbeanstalk describe-applications --application-names $AppName --query "Applications[0].ApplicationName" --output text 2>$null
+if ($EbApp -eq "None" -or [string]::IsNullOrWhiteSpace($EbApp)) {
+    Write-Host "==> Creating Elastic Beanstalk application..."
+    Invoke-Aws elasticbeanstalk create-application --application-name $AppName | Out-Null
+} else {
+    Write-Host "==> EB application '$AppName' already exists, skipping."
+}
+
+# Elastic Beanstalk environment
+$EbEnvStatus = aws elasticbeanstalk describe-environments --environment-names $EnvName --query "Environments[0].Status" --output text 2>$null
+if ($EbEnvStatus -eq "None" -or [string]::IsNullOrWhiteSpace($EbEnvStatus)) {
+    Write-Host "==> Getting latest Docker solution stack..."
+    $SolutionStack = aws elasticbeanstalk list-available-solution-stacks `
+        --query "SolutionStacks[?contains(@,'running Docker')]|[0]" --output text
+
+    Write-Host "==> Creating Elastic Beanstalk environment (takes ~5 minutes)..."
+    $EbOptions = Write-TempJson @(
+        @{ Namespace = "aws:autoscaling:launchconfiguration"; OptionName = "IamInstanceProfile"; Value = $Ec2Profile }
+        @{ Namespace = "aws:ec2:instances";                   OptionName = "InstanceTypes";       Value = "t3.micro" }
+    )
+    Invoke-Aws elasticbeanstalk create-environment `
+        --application-name $AppName `
+        --environment-name $EnvName `
+        --solution-stack-name $SolutionStack `
+        --option-settings "file://$EbOptions" | Out-Null
+
+    Write-Host "==> Waiting for environment to become ready..."
+    do {
+        Start-Sleep -Seconds 30
+        $EbEnvStatus = aws elasticbeanstalk describe-environments `
+            --environment-names $EnvName --query "Environments[0].Status" --output text
+        Write-Host "    Status: $EbEnvStatus"
+    } while ($EbEnvStatus -ne "Ready")
+} else {
+    Write-Host "==> EB environment '$EnvName' already exists, skipping."
+}
+
+$EbUrl = aws elasticbeanstalk describe-environments `
+    --environment-names $EnvName --query "Environments[0].CNAME" --output text
 
 Write-Host ""
 Write-Host "Infrastructure ready!"
 Write-Host ""
 Write-Host "To build and deploy at any time, run:"
-Write-Host "  aws codebuild start-build --project-name $ServiceName --region $Region"
+Write-Host "  aws codebuild start-build --project-name $AppName --region $Region"
 Write-Host ""
-Write-Host "Build logs: https://$Region.console.aws.amazon.com/codesuite/codebuild/projects/$ServiceName"
+Write-Host "App URL (after first deploy): http://$EbUrl"

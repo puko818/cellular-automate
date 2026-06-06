@@ -13,27 +13,12 @@ phases:
 
   post_build:
     commands:
-      - |
-        EXISTING=$(aws apprunner list-services \
-          --query "ServiceSummaryList[?ServiceName=='$SERVICE_NAME'].ServiceArn" \
-          --output text)
-        if [ -z "$EXISTING" ]; then
-          URL=$(aws apprunner create-service \
-            --service-name $SERVICE_NAME \
-            --source-configuration "{
-              \"ImageRepository\": {
-                \"ImageIdentifier\": \"$ECR_REGISTRY/$ECR_REPOSITORY:latest\",
-                \"ImageConfiguration\": {\"Port\": \"5000\"},
-                \"ImageRepositoryType\": \"ECR\"
-              },
-              \"AuthenticationConfiguration\": {
-                \"AccessRoleArn\": \"$APPRUNNER_ROLE_ARN\"
-              },
-              \"AutoDeploymentsEnabled\": true
-            }" \
-            --instance-configuration '{"Cpu":"1 vCPU","Memory":"2 GB"}' \
-            --query "Service.ServiceUrl" --output text)
-          echo "Deployed! Service URL: https://$URL"
-        else
-          echo "App Runner will auto-deploy the new image."
-        fi
+      # Generate Dockerrun.aws.json with the actual ECR image URL and upload to EB
+      - printf '{"AWSEBDockerrunVersion":"1","Image":{"Name":"%s/%s:latest","Update":"true"},"Ports":[{"ContainerPort":5000}]}' "$ECR_REGISTRY" "$ECR_REPOSITORY" > Dockerrun.aws.json
+      - zip deploy.zip Dockerrun.aws.json
+      - S3_KEY="deploy-${CODEBUILD_BUILD_NUMBER}.zip"
+      - aws s3 cp deploy.zip s3://$EB_BUCKET/$S3_KEY
+      - aws elasticbeanstalk create-application-version --application-name $APP_NAME --version-label "v${CODEBUILD_BUILD_NUMBER}" --source-bundle S3Bucket=$EB_BUCKET,S3Key=$S3_KEY
+      - aws elasticbeanstalk update-environment --environment-name $EB_ENV_NAME --version-label "v${CODEBUILD_BUILD_NUMBER}"
+      - URL=$(aws elasticbeanstalk describe-environments --environment-names $EB_ENV_NAME --query "Environments[0].CNAME" --output text)
+      - echo "App URL - http://$URL"
