@@ -37,7 +37,7 @@ The simulation numerically integrates two coupled partial differential equations
 - **F = 0.0367** — feed rate (how fast nutrient replenishes)
 - **K = 0.0649** — kill rate (how fast activator decays)
 
-These specific F/K values place the system in the **mitosis regime**: existing blobs grow until they divide in two, producing the characteristic spreading dot pattern.
+These are the default values and place the system in the **mitosis regime**: existing blobs grow until they divide in two, producing the characteristic spreading dot pattern. All four can be overridden via `--Du`, `--Dv`, `--F`, `--K` to explore other regimes.
 
 Each recorded frame is produced by running 8 simulation steps, then mapping V concentration through a GFP colormap (black = no activator, bright green = active blob) and piping raw RGB24 frames directly into ffmpeg.
 
@@ -91,6 +91,8 @@ snakemake -n            # dry-run
 | `--crf` | 18 | ffmpeg quality (0 = lossless, 18 = high, 23 = default) |
 | `--seed` | None | RNG seed for reproducible output |
 | `--out` | turing_mitosis_lf.mp4 | Output file path |
+| `--Du` / `--Dv` | 0.16 / 0.08 | Diffusion rates — Dv is typically Du/2 |
+| `--F` / `--K` | 0.0367 / 0.0649 | Feed and kill rates — change these to explore other pattern regimes |
 
 #### Cell size
 
