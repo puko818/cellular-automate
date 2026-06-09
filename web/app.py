@@ -26,6 +26,11 @@ def run_simulation(job_id: str, args: dict):
         "--burn_in",     str(args["burn_in"]),
         "--steps_frame", str(args["steps_frame"]),
         "--crf",         str(args["crf"]),
+        "--cell_size",   str(args.get("cell_size", 1)),
+        "--Du",          str(args.get("Du", 0.16)),
+        "--Dv",          str(args.get("Dv", 0.08)),
+        "--F",           str(args.get("F", 0.0367)),
+        "--K",           str(args.get("K", 0.0649)),
     ]
     if args.get("seed") is not None:
         cmd += ["--seed", str(args["seed"])]

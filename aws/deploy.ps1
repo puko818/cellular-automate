@@ -87,13 +87,15 @@ if ($LASTEXITCODE -ne 0) {
         Statement = @(@{ Effect = "Allow"; Principal = @{ Service = "codebuild.amazonaws.com" }; Action = "sts:AssumeRole" })
     }
     Invoke-Aws iam create-role --role-name $CodeBuildRole --assume-role-policy-document "file://$CodeBuildTrust" | Out-Null
-    Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser | Out-Null
-    Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess | Out-Null
-    Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk | Out-Null
-    Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess | Out-Null
 } else {
     Write-Host "==> IAM role '$CodeBuildRole' already exists, skipping."
 }
+# Always ensure all required policies are attached (safe to re-run — attach-role-policy is idempotent)
+Write-Host "==> Ensuring CodeBuild role policies are attached..."
+Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser | Out-Null
+Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess | Out-Null
+Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AdministratorAccess-AWSElasticBeanstalk | Out-Null
+Invoke-Aws iam attach-role-policy --role-name $CodeBuildRole --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess | Out-Null
 $CodeBuildRoleArn = aws iam get-role --role-name $CodeBuildRole --query Role.Arn --output text
 
 # GitHub credentials for CodeBuild
@@ -103,31 +105,32 @@ Invoke-Aws codebuild import-source-credentials `
     --auth-type PERSONAL_ACCESS_TOKEN `
     --token $GitHubToken | Out-Null
 
-# CodeBuild project
+# CodeBuild project — always create-or-update so env vars stay in sync
+$ProjectConfig = @{
+    name        = $AppName
+    source      = @{ type = "GITHUB"; location = $GitHubRepoUrl; buildspec = "buildspec.yml" }
+    environment = @{
+        type                 = "LINUX_CONTAINER"
+        image                = "aws/codebuild/standard:7.0"
+        computeType          = "BUILD_GENERAL1_SMALL"
+        privilegedMode       = $true
+        environmentVariables = @(
+            @{ name = "ECR_REPOSITORY"; value = $RepoName }
+            @{ name = "APP_NAME";       value = $AppName }
+            @{ name = "EB_ENV_NAME";    value = $EnvName }
+            @{ name = "EB_BUCKET";      value = $EbBucket }
+        )
+    }
+    serviceRole = $CodeBuildRoleArn
+    artifacts   = @{ type = "NO_ARTIFACTS" }
+}
 $Existing = aws codebuild batch-get-projects --names $AppName --query "projects[0].name" --output text 2>$null
 if ($Existing -eq "None" -or [string]::IsNullOrWhiteSpace($Existing)) {
     Write-Host "==> Creating CodeBuild project..."
-    $Project = Write-TempJson @{
-        name        = $AppName
-        source      = @{ type = "GITHUB"; location = $GitHubRepoUrl; buildspec = "buildspec.yml" }
-        environment = @{
-            type                 = "LINUX_CONTAINER"
-            image                = "aws/codebuild/standard:7.0"
-            computeType          = "BUILD_GENERAL1_SMALL"
-            privilegedMode       = $true
-            environmentVariables = @(
-                @{ name = "ECR_REPOSITORY"; value = $RepoName }
-                @{ name = "APP_NAME";       value = $AppName }
-                @{ name = "EB_ENV_NAME";    value = $EnvName }
-                @{ name = "EB_BUCKET";      value = $EbBucket }
-            )
-        }
-        serviceRole = $CodeBuildRoleArn
-        artifacts   = @{ type = "NO_ARTIFACTS" }
-    }
-    Invoke-Aws codebuild create-project --cli-input-json "file://$Project" | Out-Null
+    Invoke-Aws codebuild create-project --cli-input-json "file://$(Write-TempJson $ProjectConfig)" | Out-Null
 } else {
-    Write-Host "==> CodeBuild project '$AppName' already exists, skipping."
+    Write-Host "==> Updating CodeBuild project '$AppName'..."
+    Invoke-Aws codebuild update-project --cli-input-json "file://$(Write-TempJson $ProjectConfig)" | Out-Null
 }
 
 # Elastic Beanstalk application

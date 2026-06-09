@@ -52,6 +52,21 @@
     .field input:focus { border-color: #39ff14; outline: none; }
     .field input::placeholder { color: #444; }
 
+    .field select {
+      width: 100%;
+      background: #111;
+      border: 1px solid #2a2a2a;
+      color: #e8e8e8;
+      padding: 9px 12px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 0.95rem;
+      transition: border-color 0.15s;
+      appearance: none;
+      cursor: pointer;
+    }
+    .field select:focus { border-color: #39ff14; outline: none; }
+
     .hint { font-size: 0.7rem; color: #444; margin-top: 5px; }
 
     .full { grid-column: 1 / -1; }
@@ -126,13 +141,22 @@
 
   <div class="grid">
 
+    <div class="field full">
+      <label>Resolution preset</label>
+      <select id="resolution" onchange="applyResolution(this.value)">
+        <option value="preview">Preview — 540×540 (4× faster)</option>
+        <option value="export" selected>Export — 1080×1080</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+
     <div class="field">
       <label>Width (px)</label>
-      <input type="number" id="width" value="1080" min="64" max="3840" step="2">
+      <input type="number" id="width" value="1080" min="64" max="3840" step="2" disabled>
     </div>
     <div class="field">
       <label>Height (px)</label>
-      <input type="number" id="height" value="1080" min="64" max="3840" step="2">
+      <input type="number" id="height" value="1080" min="64" max="3840" step="2" disabled>
     </div>
 
     <div class="field">
@@ -168,6 +192,49 @@
       <p class="hint">Lower = larger file, better quality</p>
     </div>
 
+    <hr class="divider">
+
+    <div class="field full">
+      <label>Gray-Scott preset</label>
+      <select id="gs_preset" onchange="applyPreset(this.value)">
+        <option value="mitosis">Mitosis — dividing blobs (default)</option>
+        <option value="coral">Coral — branching growth</option>
+        <option value="spots">Spots — stable dots</option>
+        <option value="stripes">Stripes — labyrinth</option>
+        <option value="worms">Worms — moving filaments</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Du — food diffusion</label>
+      <input type="number" id="Du" value="0.16" min="0.001" max="1" step="0.001">
+    </div>
+    <div class="field">
+      <label>Dv — activator diffusion</label>
+      <input type="number" id="Dv" value="0.08" min="0.001" max="1" step="0.001">
+    </div>
+
+    <div class="field">
+      <label>F — feed rate</label>
+      <input type="number" id="F" value="0.0367" min="0.001" max="0.1" step="0.0001">
+    </div>
+    <div class="field">
+      <label>K — kill rate</label>
+      <input type="number" id="K" value="0.0649" min="0.001" max="0.1" step="0.0001">
+    </div>
+
+    <div class="field">
+      <label>Cell size</label>
+      <select id="cell_size">
+        <option value="1">1× — normal</option>
+        <option value="2">2× — larger blobs</option>
+        <option value="3">3× — big blobs</option>
+        <option value="4">4× — very big blobs</option>
+      </select>
+      <p class="hint">Sim resolution ÷ N, output stays the same</p>
+    </div>
+
     <div class="field">
       <label>RNG seed (optional)</label>
       <input type="number" id="seed" placeholder="random">
@@ -188,8 +255,33 @@
 </div>
 
 <script>
-  let currentJobId  = null;
-  let pollInterval  = null;
+  let currentJobId = null;
+  let pollInterval = null;
+
+  const GS_PRESETS = {
+    mitosis: { Du: 0.16,   Dv: 0.08,   F: 0.0367, K: 0.0649 },
+    coral:   { Du: 0.16,   Dv: 0.08,   F: 0.0545, K: 0.0620 },
+    spots:   { Du: 0.16,   Dv: 0.08,   F: 0.0350, K: 0.0650 },
+    stripes: { Du: 0.16,   Dv: 0.08,   F: 0.0600, K: 0.0450 },
+    worms:   { Du: 0.16,   Dv: 0.08,   F: 0.0780, K: 0.0610 },
+  };
+
+  function applyPreset(val) {
+    const p = GS_PRESETS[val];
+    if (!p) return;
+    document.getElementById('Du').value = p.Du;
+    document.getElementById('Dv').value = p.Dv;
+    document.getElementById('F').value  = p.F;
+    document.getElementById('K').value  = p.K;
+  }
+
+  function applyResolution(val) {
+    const w = document.getElementById('width');
+    const h = document.getElementById('height');
+    if (val === 'preview')      { w.value = 540;  h.value = 540;  w.disabled = true;  h.disabled = true; }
+    else if (val === 'export')  { w.value = 1080; h.value = 1080; w.disabled = true;  h.disabled = true; }
+    else                        {                                  w.disabled = false; h.disabled = false; }
+  }
 
   async function runSimulation() {
     clearInterval(pollInterval);
@@ -205,6 +297,11 @@
       steps_frame: parseInt(document.getElementById('steps_frame').value),
       crf:         parseInt(document.getElementById('crf').value),
       seed:        seedVal !== '' ? parseInt(seedVal) : null,
+      cell_size:   parseInt(document.getElementById('cell_size').value),
+      Du:          parseFloat(document.getElementById('Du').value),
+      Dv:          parseFloat(document.getElementById('Dv').value),
+      F:           parseFloat(document.getElementById('F').value),
+      K:           parseFloat(document.getElementById('K').value),
     };
 
     setStatus('running', 'Starting simulation…');
