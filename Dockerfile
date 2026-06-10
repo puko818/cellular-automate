@@ -1,5 +1,5 @@
 # slim keeps the image small; ffmpeg is not available as a pip package so we need the OS layer
-FROM python:3.11-slim
+FROM public.ecr.aws/docker/library/python:3.11-slim
 
 # ffmpeg is required by turing_mitosis_mpeg.py to encode raw RGB frames into H.264 MP4 via stdin pipe
 # --no-install-recommends and cache cleanup keep the image lean
